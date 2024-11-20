@@ -1,0 +1,22 @@
+name: Build and Push Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Log in to GHCR
+      run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Build and Push Image
+      run: |
+        docker build -t ghcr.io/${{ github.actor }}/bship-soundwave:latest .
+        docker push ghcr.io/${{ github.actor }}/bship-soundwave:latest
