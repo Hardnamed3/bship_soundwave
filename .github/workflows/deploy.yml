@@ -18,5 +18,6 @@ jobs:
 
     - name: Build and Push Image
       run: |
-        docker build -t ghcr.io/${{ github.actor }}/bship-soundwave:latest .
-        docker push ghcr.io/${{ github.actor }}/bship-soundwave:latest
+        USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
+        docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
+        docker push ghcr.io/$USERNAME/bship-soundwave:latest
