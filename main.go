@@ -2,117 +2,137 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
+	"fmt"
+	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
 	"log"
 	"net/http"
 )
 
 type Message struct {
+	ID      int    `json:"id"`
 	Message string `json:"message"`
+	UserID  int    `json:"user_id"`
+	//need username to be displayed
 }
+
+const (
+	DB_USER     = "swaveadmin"
+	DB_PASSWORD = "swavepwd"
+	DB_NAME     = "swave"
+	DB_HOST     = "localhost"
+	DB_PORT     = "5432"
+)
+
+var db *sql.DB
 
 func main() {
-	http.HandleFunc("/api/hello", HelloHandler)
-	http.HandleFunc("/api/messages", MessagesHandler)
+	var err error
+	db, err = createDBConnection()
+	if err != nil {
+		log.Fatalf("Error connecting to database: %v", err)
+	}
+	defer db.Close()
 
+	//Initialize Gin router
+	r := gin.Default()
+
+	// Define routes
+	r.POST("/messages", createMessage)
+	r.GET("/messages/:id", getMessage)
+	r.GET("/messages", listMessages)
+
+	//Start server
 	log.Println("Starting server on :8080...")
-	http.ListenAndServe(":8080", nil)
+	r.Run(":8080")
 }
 
-func HelloHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+// Create a database connection
+func createDBConnection() (*sql.DB, error) {
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+	return sql.Open("postgres", connStr)
+}
 
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+func createMessage(c *gin.Context) {
+	var msg Message
+	if err := c.ShouldBindJSON(&msg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if r.Method == http.MethodPost {
-		var msg Message
-		json.NewDecoder(r.Body).Decode(&msg)
-		// Insert into PostgreSQL (implement below)
-		InsertMessage(msg.Message)
-		json.NewEncoder(w).Encode(msg)
-	} else if r.Method == http.MethodGet {
-		// Retrieve from PostgreSQL (implement below)
-		message := GetMessage()
-		json.NewEncoder(w).Encode(Message{Message: message})
-	}
-}
-
-// MessagesHandler handles the GET request for "/api/messages"
-func MessagesHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	if r.Method == http.MethodOptions {
-		// Pre-flight request for CORS
-		w.WriteHeader(http.StatusOK)
+	id, err := insertMessage(msg.Message, msg.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create message"})
 		return
 	}
 
-	if r.Method == http.MethodGet {
-		// Retrieve all messages from PostgreSQL
-		messages := GetAllMessages()
-		// Respond with all messages
-		json.NewEncoder(w).Encode(messages)
-	}
+	msg.ID = id
+	c.JSON(http.StatusCreated, msg)
 }
+
+// getMessage handles GET requests to "/api/hello"
+func getMessage(c *gin.Context) {
+	id := c.Param("id")
+	msg, err := fetchMessageByID(id)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve message"})
+		return
+	}
+
+	c.JSON(http.StatusOK, msg)
+}
+
+// listMessages handles GET requests to "/api/messages"
+func listMessages(c *gin.Context) {
+	messages, err := fetchAllMessages()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list messages"})
+		return
+	}
+
+	c.JSON(http.StatusOK, messages)
+}
+
+//missing update and delete
 
 // Database functions
-func InsertMessage(message string) {
-	db, err := sql.Open("postgres", "postgres://swaveadmin:swavepwd@postgres-db:5432/swave?sslmode=disable")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	_, err = db.Exec("INSERT INTO messages (message) VALUES ($1)", message)
-	if err != nil {
-		log.Fatal(err)
-	}
+
+// InsertMessage inserts a new message associated with a user ID
+func insertMessage(message string, userID int) (int, error) {
+	var id int
+	err := db.QueryRow(
+		"INSERT INTO messages (message, user_id) VALUES ($1, $2) RETURNING id",
+		message, userID,
+	).Scan(&id)
+	return id, err
 }
 
-func GetMessage() string {
-	db, err := sql.Open("postgres", "postgres://swaveadmin:swavepwd@postgres-db:5432/swave?sslmode=disable")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	var message string
-	db.QueryRow("SELECT message FROM messages ORDER BY id DESC LIMIT 1").Scan(&message)
-	return message
+func fetchMessageByID(id string) (Message, error) {
+	var msg Message
+	err := db.QueryRow(
+		"SELECT id, message, user_id FROM messages WHERE id = $1", id,
+	).Scan(&msg.ID, &msg.Message, &msg.UserID)
+	return msg, err
 }
 
-// GetAllMessages retrieves all messages from the database
-func GetAllMessages() []Message {
-	db, err := sql.Open("postgres", "postgres://swaveadmin:swavepwd@postgres-db:5432/swave?sslmode=disable")
+func fetchAllMessages() ([]Message, error) {
+	rows, err := db.Query("SELECT id, message, user_id FROM messages")
 	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query("SELECT message FROM messages")
-	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	defer rows.Close()
 
 	var messages []Message
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.Message); err != nil {
-			log.Fatal(err)
+		if err := rows.Scan(&msg.ID, &msg.Message, &msg.UserID); err != nil {
+			return nil, err
 		}
 		messages = append(messages, msg)
 	}
-
-	if err := rows.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	return messages
+	return messages, rows.Err()
 }
