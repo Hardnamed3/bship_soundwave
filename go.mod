@@ -7,6 +7,8 @@ require (
 	github.com/lib/pq v1.10.9 // Ensure the correct version is here
 )
 
+require github.com/streadway/amqp v1.1.0
+
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
 	github.com/bytedance/sonic/loader v0.1.1 // indirect

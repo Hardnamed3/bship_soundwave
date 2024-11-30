@@ -2,18 +2,35 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq"
+
 	"log"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
+	"github.com/streadway/amqp"
+)
+
+// RabbitMQ configuration
+const (
+	RabbitMQURL      = "amqp://guest:guest@localhost:5672/"
+	UserCreatedQueue = "user_created"
+	UserUpdatedQueue = "user_updated"
+	UserDeletedQueue = "user_deleted"
 )
 
 type Message struct {
 	ID      int    `json:"id"`
 	Message string `json:"message"`
 	UserID  int    `json:"user_id"`
-	//need username to be displayed
+}
+
+type MessageWithUser struct {
+	ID       int    `json:"id"`
+	Message  string `json:"message"`
+	Username string `json:"username"`
 }
 
 const (
@@ -24,7 +41,10 @@ const (
 	DB_PORT     = "5432"
 )
 
-var db *sql.DB
+var (
+	db       *sql.DB
+	rabbitCh *amqp.Channel
+)
 
 func main() {
 	var err error
@@ -34,13 +54,21 @@ func main() {
 	}
 	defer db.Close()
 
+	err = consumeRabbitMQ()
+	if err != nil {
+		log.Fatalf("Error consuming RabbitMQ messages: %v", err)
+	}
+
 	//Initialize Gin router
 	r := gin.Default()
 
 	// Define routes
 	r.POST("/messages", createMessage)
-	r.GET("/messages/:id", getMessage)
-	r.GET("/messages", listMessages)
+	r.GET("/messages/:id", getMessageWithUsername)
+	r.GET("/messages", listMessagesWithUsers)
+	r.GET("/messages/user/:userId", listUserMessages)
+	r.PUT("/messages/:id", updateMessage)
+	r.DELETE("/messages/:id", deleteMessage)
 
 	//Start server
 	log.Println("Starting server on :8080...")
@@ -52,6 +80,58 @@ func createDBConnection() (*sql.DB, error) {
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
 	return sql.Open("postgres", connStr)
+}
+
+func consumeRabbitMQ() error {
+	conn, err := amqp.Dial(RabbitMQURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+	}
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to open RabbitMQ channel: %w", err)
+	}
+	defer ch.Close()
+
+	queues := []string{UserCreatedQueue, UserUpdatedQueue, UserDeletedQueue}
+	for _, queue := range queues {
+		msgs, err := ch.Consume(queue, "", true, false, false, false, nil)
+		if err != nil {
+			return fmt.Errorf("failed to register consumer for queue %s: %w", queue, err)
+		}
+
+		go func(queueName string) {
+			for msg := range msgs {
+				handleMessage(queueName, msg.Body)
+			}
+		}(queue)
+	}
+
+	// Block the main thread
+	select {}
+}
+
+func handleMessage(queue string, body []byte) {
+	switch queue {
+	case UserCreatedQueue:
+		var user User
+		if err := json.Unmarshal(body, &user); err == nil {
+			insertUserReplica(user.Username)
+		}
+	case UserUpdatedQueue:
+		var user User
+		if err := json.Unmarshal(body, &user); err == nil {
+			updateUserReplica(fmt.Sprintf("%d", user.ID), user.Username)
+		}
+	case UserDeletedQueue:
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err == nil {
+			id := fmt.Sprintf("%v", payload["id"])
+			deleteUserReplica(id)
+		}
+	}
 }
 
 func createMessage(c *gin.Context) {
@@ -71,10 +151,10 @@ func createMessage(c *gin.Context) {
 	c.JSON(http.StatusCreated, msg)
 }
 
-// getMessage handles GET requests to "/api/hello"
-func getMessage(c *gin.Context) {
+// getMessageWithUsername handles GET requests to "/messages/:id"
+func getMessageWithUsername(c *gin.Context) {
 	id := c.Param("id")
-	msg, err := fetchMessageByID(id)
+	msg, err := fetchMessageWithUsername(id)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
@@ -86,7 +166,17 @@ func getMessage(c *gin.Context) {
 	c.JSON(http.StatusOK, msg)
 }
 
-// listMessages handles GET requests to "/api/messages"
+func listUserMessages(c *gin.Context) {
+	userId := c.Param("userId")
+	messages, err := fetchAllMessagesByUserId(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user messages"})
+		return
+	}
+
+	c.JSON(http.StatusOK, messages)
+}
+
 func listMessages(c *gin.Context) {
 	messages, err := fetchAllMessages()
 	if err != nil {
@@ -97,7 +187,52 @@ func listMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, messages)
 }
 
-//missing update and delete
+// listMessagesWithUsers handles GET requests to "/messages"
+func listMessagesWithUsers(c *gin.Context) {
+	messages, err := fetchAllMessagesWithUsers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list messages"})
+		return
+	}
+
+	c.JSON(http.StatusOK, messages)
+}
+
+func updateMessage(c *gin.Context) {
+	id := c.Param("id")
+	var message Message
+	if err := c.ShouldBindJSON(&message); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updatedMessage, err := updateMessageDetails(id, message.Message)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+
+	c.JSON(http.StatusOK, updatedMessage)
+}
+
+func deleteMessage(c *gin.Context) {
+	id := c.Param("id")
+
+	rowsAffected, err := deleteMessageByID(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Message deleted"})
+}
 
 // Database functions
 
@@ -119,6 +254,24 @@ func fetchMessageByID(id string) (Message, error) {
 	return msg, err
 }
 
+func fetchMessageWithUsername(id string) (MessageWithUser, error) {
+	var msg MessageWithUser
+	err := db.QueryRow(
+		`SELECT m.id, m.message, u.username 
+         FROM messages m 
+         JOIN user_replica u ON m.user_id = u.id 
+         WHERE m.id = $1`, id,
+	).Scan(&msg.ID, &msg.Message, &msg.Username)
+
+	if err != nil {
+		log.Printf("Error fetching message with username: %v", err)
+		return msg, err
+	}
+
+	return msg, nil
+}
+
+// currently no endpoint
 func fetchAllMessages() ([]Message, error) {
 	rows, err := db.Query("SELECT id, message, user_id FROM messages")
 	if err != nil {
@@ -135,4 +288,95 @@ func fetchAllMessages() ([]Message, error) {
 		messages = append(messages, msg)
 	}
 	return messages, rows.Err()
+}
+
+func fetchAllMessagesWithUsers() ([]MessageWithUser, error) {
+	rows, err := db.Query(`
+        SELECT m.id, m.message, u.username 
+        FROM messages m 
+        JOIN user_replica u ON m.user_id = u.id
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []MessageWithUser
+	for rows.Next() {
+		var msg MessageWithUser
+		if err := rows.Scan(&msg.ID, &msg.Message, &msg.Username); err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
+func fetchAllMessagesByUserId(userId string) ([]Message, error) {
+	rows, err := db.Query(
+		`SELECT id, message, user_id
+			FROM messages
+			WHERE user_id = $1`, userId,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var msg Message
+		if err := rows.Scan(&msg.ID, &msg.Message, &msg.UserID); err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
+func updateMessageDetails(id string, messageBody string) (Message, error) {
+	var message Message
+	err := db.QueryRow(
+		"UPDATE messages SET message = $2 WHERE id = $1 RETURNING id, message, user_id",
+		id, messageBody,
+	).Scan(&message.ID, &message.Message, &message.UserID)
+	return message, err
+}
+
+func deleteMessageByID(id string) (int64, error) {
+	result, err := db.Exec("DELETE FROM messages WHERE id = $1", id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func insertUserReplica(userName string) error {
+	_, err := db.Exec(
+		"INSERT INTO user_replica (username) VALUES ($1)",
+		userName,
+	)
+	if err != nil {
+		log.Printf("Error inserting user replica: %v", err)
+	}
+	return err
+}
+
+func updateUserReplica(id string, userName string) error {
+	_, err := db.Exec(
+		"UPDATE user_replica SET username = $2 WHERE id = $1",
+		id, userName,
+	)
+	if err != nil {
+		log.Printf("Error updating user replica: %v", err)
+	}
+	return err
+}
+
+func deleteUserReplica(id string) (int64, error) {
+	result, err := db.Exec("DELETE FROM user_replica WHERE id = $1", id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
