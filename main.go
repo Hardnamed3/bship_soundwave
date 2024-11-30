@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -35,11 +36,11 @@ type MessageWithUser struct {
 }
 
 const (
-	DB_USER     = "swaveadmin"
-	DB_PASSWORD = "swavepwd"
-	DB_NAME     = "swave"
-	DB_HOST     = "localhost"
-	DB_PORT     = "5432"
+	DbUser     = "swaveadmin"
+	DbPassword = "swavepwd"
+	DbName     = "swave"
+	DbHost     = "localhost"
+	DbPort     = "5432"
 )
 
 var (
@@ -53,7 +54,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
 	}
-	defer db.Close()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Printf("Error closing database connection: %v", err)
+		}
+	}(db)
 
 	err = consumeRabbitMQ()
 	if err != nil {
@@ -73,13 +79,16 @@ func main() {
 
 	//Start server
 	log.Println("Starting server on :8080...")
-	r.Run(":8080")
+	err = r.Run(":8080")
+	if err != nil {
+		return
+	}
 }
 
 // Create a database connection
 func createDBConnection() (*sql.DB, error) {
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+		DbHost, DbPort, DbUser, DbPassword, DbName)
 	return sql.Open("postgres", connStr)
 }
 
@@ -220,7 +229,7 @@ func createMessage(c *gin.Context) {
 func getMessageWithUsername(c *gin.Context) {
 	id := c.Param("id")
 	msg, err := fetchMessageWithUsername(id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
 	} else if err != nil {
@@ -272,7 +281,7 @@ func updateMessage(c *gin.Context) {
 	}
 
 	updatedMessage, err := updateMessageDetails(id, message.Message)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
 	} else if err != nil {
@@ -342,7 +351,12 @@ func fetchAllMessages() ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
+			log.Printf("Error closing rows: %v", err)
+		}
+	}(rows)
 
 	var messages []Message
 	for rows.Next() {
@@ -364,7 +378,12 @@ func fetchAllMessagesWithUsers() ([]MessageWithUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
+			log.Printf("Error closing rows: %v", err)
+		}
+	}(rows)
 
 	var messages []MessageWithUser
 	for rows.Next() {
@@ -386,7 +405,12 @@ func fetchAllMessagesByUserId(userId string) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
+			log.Printf("Error closing rows: %v", err)
+		}
+	}(rows)
 
 	var messages []Message
 	for rows.Next() {
@@ -451,5 +475,20 @@ func deleteUserReplica(id string) error {
 	if err != nil {
 		log.Printf("Error deleting user replica: %v", err)
 	}
+	return err
+}
+
+// getUserReplica retrieves a user replica from the database
+// given a user ID and returns any error encountered.
+func getUserReplica(id string) error {
+	_, err := db.Exec(
+		"SELECT id, username FROM user_replica WHERE id = $1",
+		id,
+	)
+
+	if err != nil {
+		log.Printf("Error fetching user replica: %v", err)
+	}
+
 	return err
 }
