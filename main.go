@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"log"
 	"net/http"
@@ -87,50 +88,114 @@ func consumeRabbitMQ() error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
+	rabbitCh, err = conn.Channel()
 	if err != nil {
 		return fmt.Errorf("failed to open RabbitMQ channel: %w", err)
 	}
-	defer ch.Close()
 
-	queues := []string{UserCreatedQueue, UserUpdatedQueue, UserDeletedQueue}
-	for _, queue := range queues {
-		msgs, err := ch.Consume(queue, "", true, false, false, false, nil)
-		if err != nil {
-			return fmt.Errorf("failed to register consumer for queue %s: %w", queue, err)
-		}
-
-		go func(queueName string) {
-			for msg := range msgs {
-				handleMessage(queueName, msg.Body)
-			}
-		}(queue)
+	// Declare the exchange
+	err = rabbitCh.ExchangeDeclare(
+		"user_events", // Exchange name
+		"fanout",      // Type
+		true,          // Durable
+		false,         // Auto-delete
+		false,         // Internal
+		false,         // No-wait
+		nil,           // Arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
-	// Block the main thread
-	select {}
+	// Declare the queue
+	q, err := rabbitCh.QueueDeclare(
+		"",    // Generate a random queue name
+		true,  // Durable
+		false, // Auto-delete
+		true,  // Exclusive
+		false, // No-wait
+		nil,   // Arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to declare queue: %w", err)
+	}
+
+	// Bind the queue to the exchange
+	err = rabbitCh.QueueBind(
+		q.Name,        // Queue name
+		"",            // Routing key
+		"user_events", // Exchange name
+		false,         // No-wait
+		nil,           // Arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bind queue: %w", err)
+	}
+
+	// Start consuming messages
+	msgs, err := rabbitCh.Consume(
+		q.Name, // Queue name
+		"",     // Consumer tag
+		true,   // Auto-ack
+		false,  // Exclusive
+		false,  // No-local
+		false,  // No-wait
+		nil,    // Arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to register consumer: %w", err)
+	}
+
+	go func() {
+		for msg := range msgs {
+			handleMessage(msg)
+		}
+	}()
+
+	return nil
 }
 
-func handleMessage(queue string, body []byte) {
-	switch queue {
+func handleMessage(msg amqp.Delivery) {
+	var event map[string]string
+	err := json.Unmarshal(msg.Body, &event)
+	if err != nil {
+		log.Printf("Error parsing message: %v", err)
+		return
+	}
+
+	userID, ok := event["user_id"]
+	if !ok || userID == "" {
+		log.Printf("Error: missing 'user_id' in event payload")
+		return
+	}
+
+	username, _ := event["username"]
+	//if !ok || username == "" {
+	//	log.Printf("Error: missing 'username' in event payload")
+	//	return
+	//}
+
+	switch event["event_type"] { // use `event["event_type"]` or msg.RoutingKey
 	case UserCreatedQueue:
-		var user User
-		if err := json.Unmarshal(body, &user); err == nil {
-			insertUserReplica(user.Username)
+		err = insertUserReplica(userID, username)
+		if err != nil {
+			log.Printf("Error inserting user replica: %v", err)
 		}
+
 	case UserUpdatedQueue:
-		var user User
-		if err := json.Unmarshal(body, &user); err == nil {
-			updateUserReplica(fmt.Sprintf("%d", user.ID), user.Username)
+		err = updateUserReplica(userID, username)
+		if err != nil {
+			log.Printf("Error updating user replica: %v", err)
 		}
+
 	case UserDeletedQueue:
-		var payload map[string]interface{}
-		if err := json.Unmarshal(body, &payload); err == nil {
-			id := fmt.Sprintf("%v", payload["id"])
-			deleteUserReplica(id)
+		err = deleteUserReplica(userID)
+		if err != nil {
+			log.Printf("Error deleting user replica: %v", err)
 		}
+
+	default:
+		log.Printf("Unhandled message type: %s", event["event_type"])
 	}
 }
 
@@ -351,10 +416,10 @@ func deleteMessageByID(id string) (int64, error) {
 	return result.RowsAffected()
 }
 
-func insertUserReplica(userName string) error {
+func insertUserReplica(id string, userName string) error {
 	_, err := db.Exec(
-		"INSERT INTO user_replica (username) VALUES ($1)",
-		userName,
+		"INSERT INTO user_replica (id, username) VALUES ($1, $2)",
+		id, userName,
 	)
 	if err != nil {
 		log.Printf("Error inserting user replica: %v", err)
@@ -373,10 +438,18 @@ func updateUserReplica(id string, userName string) error {
 	return err
 }
 
-func deleteUserReplica(id string) (int64, error) {
-	result, err := db.Exec("DELETE FROM user_replica WHERE id = $1", id)
+func deleteUserReplica(id string) error {
+	userID, err := strconv.Atoi(id)
 	if err != nil {
-		return 0, err
+		log.Printf("Error converting id to integer: %v", err)
+		return err
 	}
-	return result.RowsAffected()
+
+	_, err = db.Exec("DELETE FROM user_replica WHERE id = $1",
+		userID,
+	)
+	if err != nil {
+		log.Printf("Error deleting user replica: %v", err)
+	}
+	return err
 }
