@@ -5,18 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/streadway/amqp"
 )
 
 // RabbitMQ configuration
-const (
+var (
 	RabbitMQURL      = "amqp://guest:guest@localhost:5672/"
 	UserCreatedQueue = "user_created"
 	UserUpdatedQueue = "user_updated"
@@ -35,7 +37,7 @@ type MessageWithUser struct {
 	Username string `json:"username"`
 }
 
-const (
+var (
 	DbUser     = "swaveadmin"
 	DbPassword = "swavepwd"
 	DbName     = "swave"
@@ -48,7 +50,26 @@ var (
 	rabbitCh *amqp.Channel
 )
 
+func envRead() string {
+	err := godotenv.Load(".env")
+
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+		return err.Error()
+	}
+	DbUser = os.Getenv("DB_USER")
+	DbPassword = os.Getenv("DB_PASSWORD")
+	DbName = os.Getenv("DB_NAME")
+	DbHost = os.Getenv("DB_HOST")
+	DbPort = os.Getenv("DB_PORT")
+
+	RabbitMQURL = os.Getenv("RABBITMQ_URL")
+	return ""
+
+}
+
 func main() {
+	envRead()
 	var err error
 	db, err = createDBConnection()
 	if err != nil {
