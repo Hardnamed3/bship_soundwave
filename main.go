@@ -64,6 +64,7 @@ func envRead() string {
 	DbPort = os.Getenv("DB_PORT")
 
 	RabbitMQURL = os.Getenv("RABBITMQ_URL")
+	log.Printf("RabbitMQURL: %s", RabbitMQURL)
 	return ""
 
 }
