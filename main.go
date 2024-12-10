@@ -52,19 +52,23 @@ var (
 
 func envRead() string {
 	err := godotenv.Load(".env")
-
 	if err != nil {
-		log.Fatalf("Error loading .env file")
-		return err.Error()
+		fmt.Printf("Warning: Error loading .env file. Falling back to os.Getenv: %v", err)
 	}
+
 	DbUser = os.Getenv("DB_USER")
+	fmt.Printf("DbUser: %s\n", DbUser)
 	DbPassword = os.Getenv("DB_PASSWORD")
+	fmt.Printf("dbPassword: %s\n", DbPassword)
 	DbName = os.Getenv("DB_NAME")
+	fmt.Printf("DbName: %s\n", DbName)
 	DbHost = os.Getenv("DB_HOST")
+	fmt.Printf("DbHost: %s\n", DbHost)
 	DbPort = os.Getenv("DB_PORT")
+	fmt.Printf("DbPort: %s\n", DbPort)
 
 	RabbitMQURL = os.Getenv("RABBITMQ_URL")
-	log.Printf("RabbitMQURL: %s", RabbitMQURL)
+	fmt.Printf("RabbitMQURL: %s\n", RabbitMQURL)
 	return ""
 
 }
