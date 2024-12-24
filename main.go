@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"os"
 	"strconv"
+	"time"
 
 	"log"
 	"net/http"
@@ -15,6 +17,8 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/streadway/amqp"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // RabbitMQ configuration
@@ -37,12 +41,32 @@ type MessageWithUser struct {
 	Username string `json:"username"`
 }
 
+// Database configuration
 var (
 	DbUser     = "swaveadmin"
 	DbPassword = "swavepwd"
 	DbName     = "swave"
 	DbHost     = "localhost"
 	DbPort     = "5432"
+)
+
+// Prometheus metrics
+var (
+	messageCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "messages_total",
+			Help: "Total number of messages processed",
+		},
+		[]string{"operation"},
+	)
+
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests",
+		},
+		[]string{"handler", "method"},
+	)
 )
 
 var (
@@ -73,8 +97,17 @@ func envRead() string {
 
 }
 
+func initMetrics() {
+	prometheus.MustRegister(messageCounter)
+	prometheus.MustRegister(requestDuration)
+}
+
 func main() {
+	//environment and metrics
 	envRead()
+	initMetrics()
+
+	//Connect to database
 	var err error
 	db, err = createDBConnection()
 	if err != nil {
@@ -87,6 +120,7 @@ func main() {
 		}
 	}(db)
 
+	//Connect to RabbitMQ
 	err = consumeRabbitMQ()
 	if err != nil {
 		log.Fatalf("Error consuming RabbitMQ messages: %v", err)
@@ -97,6 +131,10 @@ func main() {
 
 	// Add CORS middleware
 	r.Use(CORSMiddleware())
+
+	// Initialize Prometheus middleware
+	r.Use(metricsMiddleware())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Define routes
 	r.POST("/messages", createMessage)
@@ -131,6 +169,21 @@ func CORSMiddleware() gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+func metricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.FullPath()
+		if path == "" {
+			path = "undefined" // Handle cases where FullPath() is nil
+		}
+
+		c.Next()
+
+		duration := time.Since(start).Seconds()
+		requestDuration.WithLabelValues(path, c.Request.Method).Observe(duration)
 	}
 }
 
@@ -258,103 +311,164 @@ func handleMessage(msg amqp.Delivery) {
 }
 
 func createMessage(c *gin.Context) {
+	start := time.Now()
+
 	var msg Message
 	if err := c.ShouldBindJSON(&msg); err != nil {
+		messageCounter.WithLabelValues("bad_request").Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	id, err := insertMessage(msg.Message, msg.UserID)
 	if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create message"})
 		return
 	}
 
 	msg.ID = id
+
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusCreated, msg)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages", c.Request.Method).Observe(duration)
 }
 
 // getMessageWithUsername handles GET requests to "/messages/:id"
 func getMessageWithUsername(c *gin.Context) {
+	start := time.Now()
+
 	id := c.Param("id")
 	msg, err := fetchMessageWithUsername(id)
 	if errors.Is(err, sql.ErrNoRows) {
+		messageCounter.WithLabelValues("not_found").Inc()
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
 	} else if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve message"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, msg)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages/:id", c.Request.Method).Observe(duration)
 }
 
 func listUserMessages(c *gin.Context) {
+	start := time.Now()
+
 	userId := c.Param("userId")
 	messages, err := fetchAllMessagesByUserId(userId)
 	if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user messages"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, messages)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages/:userId", c.Request.Method).Observe(duration)
 }
 
 func listMessages(c *gin.Context) {
+	start := time.Now()
+
 	messages, err := fetchAllMessages()
 	if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list messages"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, messages)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages", c.Request.Method).Observe(duration)
 }
 
 // listMessagesWithUsers handles GET requests to "/messages"
 func listMessagesWithUsers(c *gin.Context) {
+	start := time.Now()
+
 	messages, err := fetchAllMessagesWithUsers()
 	if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list messages"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, messages)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages", c.Request.Method).Observe(duration)
 }
 
 func updateMessage(c *gin.Context) {
+	start := time.Now()
+
 	id := c.Param("id")
 	var message Message
 	if err := c.ShouldBindJSON(&message); err != nil {
+		messageCounter.WithLabelValues("bad_request").Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	updatedMessage, err := updateMessageDetails(id, message.Message)
 	if errors.Is(err, sql.ErrNoRows) {
+		messageCounter.WithLabelValues("not_found").Inc()
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
 	} else if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, updatedMessage)
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages/:id", c.Request.Method).Observe(duration)
 }
 
 func deleteMessage(c *gin.Context) {
+	start := time.Now()
 	id := c.Param("id")
 
 	rowsAffected, err := deleteMessageByID(id)
 	if err != nil {
+		messageCounter.WithLabelValues("internal_error").Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
 		return
 	}
 	if rowsAffected == 0 {
+		messageCounter.WithLabelValues("not_found").Inc()
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
 	}
 
+	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusOK, gin.H{"message": "Message deleted"})
+
+	//record the request duration
+	duration := time.Since(start).Seconds()
+	requestDuration.WithLabelValues("/messages/:id", c.Request.Method).Observe(duration)
 }
 
 // Database functions
