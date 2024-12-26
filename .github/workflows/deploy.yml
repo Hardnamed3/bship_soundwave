@@ -34,7 +34,13 @@ jobs:
       with:
         project_id: operating-ethos-445009-n6
 
+# Step 5.5: Authenticate kubectl with GKE
+    - name: Install Authenticator
+      run: gcloud components install gke-gcloud-auth-plugin
 
+# Step 6: Authenticate kubectl with GKE
+    - name: Authenticate kubectl
+      run: gcloud container clusters get-credentials bship-cluster --zone europe-west1-b --project operating-ethos-445009-n6
 
 # Step 7: Deploy to GKE
     - name: Deploy to GKE
