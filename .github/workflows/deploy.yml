@@ -21,20 +21,3 @@ jobs:
         USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
         docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
         docker push ghcr.io/$USERNAME/bship-soundwave:latest
-# Step 4: Set up Google Cloud SDK
-    - name: Set up Google Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
-      with:
-        service_account_key: ${{ secrets.GCP_SA_KEY }}
-        project_id: operating-ethos-445009-n6
-
-# Step 5: Authenticate kubectl with GKE
-    - name: Authenticate kubectl
-      run: gcloud container clusters get-credentials bship-cluster --zone europe-west1-b --project operating-ethos-445009-n6
-
-# Step 6: Deploy to GKE
-    - name: Deploy to GKE
-      run: |
-        kubectl set image deployment/backend-soundwave \
-          bship-soundwave=ghcr.io/${{ github.actor }}/bship-soundwave:latest
-        kubectl rollout status deployment/backend-soundwave
