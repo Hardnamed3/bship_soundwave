@@ -22,11 +22,11 @@ jobs:
         docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
         docker push ghcr.io/$USERNAME/bship-soundwave:latest
 # Step 4: Set up Google Cloud Auth
-    - name: Set up Google Cloud SDK
-      uses: google-github-actions/auth@v0
+    - name: Set up Google Cloud Auth
+      uses: google-github-actions/auth@v2
       with:
-        service_account: ${{ secrets.WIF_PROVIDER }}
-        workload_identity_provider: ${{ secrets.SA_EMAIL }}
+        project_id: operating-ethos-445009-n6
+        workload_identity_provider: 'projects/371461966216/locations/global/workloadIdentityPools/github-actions-pool/providers/github'
 
 # Step 5: Set up Google Cloud SDK
     - name: Set up Google Cloud SDK
