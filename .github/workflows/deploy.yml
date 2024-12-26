@@ -8,16 +8,33 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-
+# Step 1: Checkout the code
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
-
+# Step 2: Log in to GHCR
     - name: Log in to GHCR
       run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
+# Step 3: Build and Push Image to GHCR
     - name: Build and Push Image
       run: |
         USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
         docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
         docker push ghcr.io/$USERNAME/bship-soundwave:latest
+# Step 4: Set up Google Cloud SDK
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        project_id: operating-ethos-445009-n6
+
+# Step 5: Authenticate kubectl with GKE
+    - name: Authenticate kubectl
+      run: gcloud container clusters get-credentials bship-cluster --zone europe-west1-b --project operating-ethos-445009-n6
+
+# Step 6: Deploy to GKE
+    - name: Deploy to GKE
+      run: |
+        kubectl set image deployment/backend-soundwave \
+          bship-soundwave=ghcr.io/${{ github.actor }}/bship-soundwave:latest
+        kubectl rollout status deployment/backend-soundwave
