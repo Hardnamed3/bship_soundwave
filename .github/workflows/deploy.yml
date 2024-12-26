@@ -45,6 +45,7 @@ jobs:
 # Step 7: Deploy to GKE
     - name: Deploy to GKE
       run: |
+        USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
         kubectl set image deployment/backend-soundwave \
-          bship-soundwave=ghcr.io/${{ github.actor }}/bship-soundwave:latest
+          bship-soundwave=ghcr.io/$USERNAME/bship-soundwave:latest
         kubectl rollout status deployment/backend-soundwave
