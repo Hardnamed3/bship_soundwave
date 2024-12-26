@@ -26,7 +26,7 @@ jobs:
       uses: google-github-actions/auth@v2
       with:
         project_id: operating-ethos-445009-n6
-        workload_identity_provider: 'projects/371461966216/locations/global/workloadIdentityPools/github-actions-pool/providers/github'
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
 
 # Step 5: Set up Google Cloud SDK
     - name: Set up Google Cloud SDK
