@@ -1,0 +1,59 @@
+name: 'Build and Deploy to GKE'
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: 'operating-ethos-445009-n6'
+  GKE_CLUSTER: 'bship-cluster'
+  GKE_ZONE: 'europe-west1-b'
+  DEPLOYMENT_NAME: 'backend-soundwave' # TODO: update to your deployment name
+  IMAGE: 'static-site'
+
+jobs:
+  setup-build-publish-deploy:
+    name: 'Setup, Build, Publish, and Deploy'
+    runs-on: 'ubuntu-latest'
+    environment: 'production'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+    
+    # Setup gcloud CLI
+    - uses: google-github-actions/setup-gcloud@1bee7de035d65ec5da40a31f8589e240eba8fde5
+      with:
+        service_account_key: ${{ secrets.GKE_SA_KEY }}
+        project_id: 'operating-ethos-445009-n6'
+
+    # Configure Docker to use the gcloud command-line tool as a credential
+    # helper for authentication
+    - run: |-
+        gcloud --quiet auth configure-docker
+
+    # Get the GKE credentials so we can deploy to the cluster
+    - uses: google-github-actions/get-gke-credentials@db150f2cc60d1716e61922b832eae71d2a45938f
+      with:
+        cluster_name: ${{ env.GKE_CLUSTER }}
+        location: ${{ env.GKE_ZONE }}
+        credentials: ${{ secrets.GKE_SA_KEY }}
+
+    # Log in to GHCR
+    - name: Log in to GHCR
+      run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+    
+    # Step 3: Build and Push Image to GHCR
+    - name: Build and Push Image
+      run: |
+        USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
+        docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
+        docker push ghcr.io/$USERNAME/bship-soundwave:latest
+
+    # Deploy the Docker image to the GKE cluster
+    - name: Deploy
+      run: |
+        kubectl set image deployment/backend-soundwave \
+          bship-soundwave=ghcr.io/${{ github.actor }}/bship-soundwave:latest
+        kubectl rollout status deployment/backend-soundwave
