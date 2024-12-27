@@ -1,6 +1,8 @@
 package main
 
 import (
+	"cloud.google.com/go/pubsub"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -194,6 +196,38 @@ func createDBConnection() (*sql.DB, error) {
 	return sql.Open("postgres", connStr)
 }
 
+// google pubsub
+func publishToPubSub(topicID string, msg Message) error {
+	ctx := context.Background()
+
+	// Initialize a Pub/Sub client
+	client, err := pubsub.NewClient(ctx, "operating-ethos-445009-n6") // Replace with your GCP project ID
+	if err != nil {
+		return fmt.Errorf("pubsub.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	// Marshal the message into JSON
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("json.Marshal: %v", err)
+	}
+
+	// Publish the message
+	topic := client.Topic(topicID)
+	result := topic.Publish(ctx, &pubsub.Message{
+		Data: data,
+	})
+
+	// Check for publish result
+	_, err = result.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("publish.Get: %v", err)
+	}
+
+	return nil
+}
+
 func consumeRabbitMQ() error {
 	conn, err := amqp.Dial(RabbitMQURL)
 	if err != nil {
@@ -328,6 +362,14 @@ func createMessage(c *gin.Context) {
 	}
 
 	msg.ID = id
+
+	// Publish the message to Pub/Sub
+	err = publishToPubSub("moderator-messages", msg)
+	if err != nil {
+		messageCounter.WithLabelValues("pubsub_error").Inc()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish message to Pub/Sub"})
+		return
+	}
 
 	messageCounter.WithLabelValues("success").Inc()
 	c.JSON(http.StatusCreated, msg)
@@ -641,8 +683,6 @@ func deleteUserReplica(id string) error {
 	return err
 }
 
-// getUserReplica retrieves a user replica from the database
-// given a user ID and returns any error encountered.
 func getUserReplica(id string) error {
 	_, err := db.Exec(
 		"SELECT id, username FROM user_replica WHERE id = $1",
