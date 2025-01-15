@@ -19,8 +19,10 @@ jobs:
     - name: Build and Push Image
       run: |
         USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
-        docker build -t ghcr.io/$USERNAME/bship-soundwave:latest .
+        COMMIT_SHA=$(echo ${{ github.sha }} | cut -c1-7)  # Shorten SHA to 7 characters
+        docker build -t ghcr.io/$USERNAME/bship-soundwave:latest -t ghcr.io/$USERNAME/bship-soundwave:$COMMIT_SHA .
         docker push ghcr.io/$USERNAME/bship-soundwave:latest
+        docker push ghcr.io/$USERNAME/bship-soundwave:$COMMIT_SHA
 # Step 4: Set up Google Cloud Auth
     - name: Set up Google Cloud Auth
       uses: google-github-actions/auth@v2
@@ -46,6 +48,7 @@ jobs:
     - name: Deploy to GKE
       run: |
         USERNAME=$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')
+        COMMIT_SHA=$(echo ${{ github.sha }} | cut -c1-7)  # Shorten SHA to 7 characters
         kubectl set image deployment/backend-soundwave \
-          bship-soundwave=ghcr.io/$USERNAME/bship-soundwave:latest
+          bship-soundwave=ghcr.io/$USERNAME/bship-soundwave:$COMMIT_SHA
         kubectl rollout status deployment/backend-soundwave

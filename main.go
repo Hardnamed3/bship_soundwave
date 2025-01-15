@@ -31,6 +31,14 @@ var (
 	UserDeletedQueue = "user_deleted"
 )
 
+// Constants for exchange and routing keys
+const (
+	UserEventsExchange    = "user_events"
+	UserDeleteExchange    = "user_delete_events"
+	UserDeleteRoutingKey  = "user.delete"
+	UserDeletedRoutingKey = "user.deleted"
+)
+
 type Message struct {
 	ID      int    `json:"id"`
 	Message string `json:"message"`
@@ -123,10 +131,16 @@ func main() {
 	}(db)
 
 	//Connect to RabbitMQ
-	err = consumeRabbitMQ()
+	rabbitCh, err = setupRabbitMQ()
 	if err != nil {
-		log.Fatalf("Error consuming RabbitMQ messages: %v", err)
+		log.Fatalf("Error setting up RabbitMQ: %v", err)
 	}
+	defer func(rabbitCh *amqp.Channel) {
+		err := rabbitCh.Close()
+		if err != nil {
+			log.Printf("Error closing RabbitMQ channel: %v", err)
+		}
+	}(rabbitCh)
 
 	//Initialize Gin router
 	r := gin.Default()
@@ -228,32 +242,46 @@ func publishToPubSub(topicID string, msg Message) error {
 	return nil
 }
 
-func consumeRabbitMQ() error {
+func setupRabbitMQ() (*amqp.Channel, error) {
 	conn, err := amqp.Dial(RabbitMQURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
-	rabbitCh, err = conn.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
-		return fmt.Errorf("failed to open RabbitMQ channel: %w", err)
+		return nil, fmt.Errorf("failed to open RabbitMQ channel: %w", err)
 	}
 
-	// Declare the exchange
-	err = rabbitCh.ExchangeDeclare(
-		"user_events", // Exchange name
-		"fanout",      // Type
-		true,          // Durable
-		false,         // Auto-delete
-		false,         // Internal
-		false,         // No-wait
-		nil,           // Arguments
+	// Declare the user events exchange
+	err = ch.ExchangeDeclare(
+		UserEventsExchange, // Exchange name
+		"fanout",           // Type
+		true,               // Durable
+		false,              // Auto-delete
+		false,              // Internal
+		false,              // No-wait
+		nil,                // Arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to declare exchange: %w", err)
+		return nil, fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
-	// Declare the queue
-	q, err := rabbitCh.QueueDeclare(
+	// Declare the direct exchange for delete events
+	err = ch.ExchangeDeclare(
+		UserDeleteExchange, // Exchange name
+		"direct",           // Type
+		true,               // Durable
+		false,              // Auto-delete
+		false,              // Internal
+		false,              // No-wait
+		nil,                // Arguments
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare direct exchange: %w", err)
+	}
+
+	// Declare the user events queue
+	userEventsQueue, err := ch.QueueDeclare(
 		"",    // Generate a random queue name
 		true,  // Durable
 		false, // Auto-delete
@@ -262,45 +290,128 @@ func consumeRabbitMQ() error {
 		nil,   // Arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to declare queue: %w", err)
+		return nil, fmt.Errorf("failed to declare user events queue: %w", err)
 	}
 
-	// Bind the queue to the exchange
-	err = rabbitCh.QueueBind(
-		q.Name,        // Queue name
-		"",            // Routing key
-		"user_events", // Exchange name
-		false,         // No-wait
-		nil,           // Arguments
+	// Bind queue to the user events exchange
+	err = ch.QueueBind(
+		userEventsQueue.Name, // Queue name
+		"",                   // Routing key
+		UserEventsExchange,   // Exchange name
+		false,                // No-wait
+		nil,                  // Arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to bind queue: %w", err)
+		return nil, fmt.Errorf("failed to bind queue: %w", err)
 	}
 
-	// Start consuming messages
-	msgs, err := rabbitCh.Consume(
-		q.Name, // Queue name
-		"",     // Consumer tag
-		true,   // Auto-ack
-		false,  // Exclusive
-		false,  // No-local
-		false,  // No-wait
-		nil,    // Arguments
+	// Set up delete events queue
+	userDeleteQueue, err := ch.QueueDeclare(
+		"user_delete_queue", // Fixed queue name for delete events
+		true,                // Durable
+		false,               // Auto-delete
+		false,               // Exclusive
+		false,               // No-wait
+		nil,                 // Arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to register consumer: %w", err)
+		return nil, fmt.Errorf("failed to declare delete queue: %w", err)
 	}
 
+	// Bind the delete queue to the delete exchange
+	err = ch.QueueBind(
+		userDeleteQueue.Name, // Queue name
+		UserDeleteRoutingKey, // Routing key
+		UserDeleteExchange,   // Exchange name
+		false,                // No-wait
+		nil,                  // Arguments
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind delete queue: %w", err)
+	}
+
+	// Start consuming event messages
+	userEventsMsgs, err := ch.Consume(
+		userEventsQueue.Name, // Queue name
+		"",                   // Consumer tag
+		true,                 // Auto-ack
+		false,                // Exclusive
+		false,                // No-local
+		false,                // No-wait
+		nil,                  // Arguments
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register consumer: %w", err)
+	}
+
+	// Start consuming delete events
+	deleteMsgs, err := ch.Consume(
+		userDeleteQueue.Name, // Queue name
+		"",                   // Consumer tag
+		false,                // Auto-ack (set to false for delete events)
+		false,                // Exclusive
+		false,                // No-local
+		false,                // No-wait
+		nil,                  // Arguments
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register delete events consumer: %w", err)
+	}
+
+	// Handle user events
 	go func() {
-		for msg := range msgs {
-			handleMessage(msg)
+		for msg := range userEventsMsgs {
+			handleUserEvent(msg) // Currently only handles user events
 		}
 	}()
+
+	// Handle delete events
+	go func() {
+		for msg := range deleteMsgs {
+			delErr := handleDeleteEvent(msg)
+			if delErr != nil {
+				log.Printf("Error handling delete event: %v", delErr)
+				msg.Nack(false, true) // Negative ack, requeue
+				continue
+			}
+			msg.Ack(false) // Positive ack
+		}
+	}()
+
+	return ch, nil
+}
+
+func publishUserDeleted(userID string) error {
+	payload := map[string]string{
+		"event_type": "user_deleted",
+		"user_id":    userID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user deleted payload: %w", err)
+	}
+
+	err = rabbitCh.Publish(
+		UserDeleteExchange,    // Exchange
+		UserDeletedRoutingKey, // Routing key
+		false,                 // Mandatory
+		false,                 // Immediate
+		amqp.Publishing{
+			ContentType:  "application/json",
+			Body:         body,
+			DeliveryMode: amqp.Persistent,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to publish user deleted event: %w", err)
+	}
 
 	return nil
 }
 
-func handleMessage(msg amqp.Delivery) {
+func handleUserEvent(msg amqp.Delivery) {
 	var event map[string]string
 	err := json.Unmarshal(msg.Body, &event)
 	if err != nil {
@@ -320,7 +431,7 @@ func handleMessage(msg amqp.Delivery) {
 	//	return
 	//}
 
-	switch event["event_type"] { // use `event["event_type"]` or msg.RoutingKey
+	switch event["event_type"] {
 	case UserCreatedQueue:
 		err = insertUserReplica(userID, username)
 		if err != nil {
@@ -334,14 +445,34 @@ func handleMessage(msg amqp.Delivery) {
 		}
 
 	case UserDeletedQueue:
-		err = deleteUserReplica(userID)
-		if err != nil {
-			log.Printf("Error deleting user replica: %v", err)
-		}
+		//do nothing, handled by delete event
 
 	default:
 		log.Printf("Unhandled message type: %s", event["event_type"])
 	}
+}
+
+func handleDeleteEvent(msg amqp.Delivery) error {
+	var payload map[string]string
+	err := json.Unmarshal(msg.Body, &payload)
+	if err != nil {
+		return fmt.Errorf("error unmarshaling delete event: %w", err)
+	}
+
+	// Process delete request
+	userID := payload["user_id"]
+	err = deleteUserReplica(userID)
+	if err != nil {
+		return fmt.Errorf("error deleting user replica: %v", err)
+	}
+
+	// Publish user deleted event
+	err = publishUserDeleted(userID)
+	if err != nil {
+		return fmt.Errorf("error publishing user deleted event: %v", err)
+	}
+
+	return nil
 }
 
 func createMessage(c *gin.Context) {
