@@ -6,8 +6,19 @@ on:
       - main
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: 1.23
+      - name: Run Tests
+        run: GO111MODULE=on go test ./...
   build-and-push:
     runs-on: ubuntu-latest
+    needs: test
 # Step 1: Checkout the code
     steps:
     - name: Checkout code

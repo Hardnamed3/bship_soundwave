@@ -644,6 +644,14 @@ func deleteMessage(c *gin.Context) {
 	requestDuration.WithLabelValues("/messages/:id", c.Request.Method).Observe(duration)
 }
 
+func ConvertStringToInt(n string) (int, error) {
+	convertN, err := strconv.Atoi(n)
+	if err != nil {
+		return 0, err
+	}
+	return convertN, err
+}
+
 // Database functions
 
 // InsertMessage inserts a new message associated with a user ID
@@ -799,7 +807,7 @@ func updateUserReplica(id string, userName string) error {
 }
 
 func deleteUserReplica(id string) error {
-	userID, err := strconv.Atoi(id)
+	userID, err := ConvertStringToInt(id)
 	if err != nil {
 		log.Printf("Error converting id to integer: %v", err)
 		return err
