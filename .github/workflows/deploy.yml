@@ -14,8 +14,10 @@ jobs:
       - uses: actions/setup-go@v1
         with:
           go-version: 1.23
-      - name: Snyk monitor
-        run: snyk test
+      - name: Snyk monitor and test
+        run: |
+          snyk test
+          snyk monitor
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
   test:
