@@ -53,11 +53,13 @@ type MessageWithUser struct {
 
 // Database configuration
 var (
-	DbUser     = "swaveadmin"
-	DbPassword = "swavepwd"
-	DbName     = "swave"
-	DbHost     = "localhost"
-	DbPort     = "5432"
+	DbUser      = "swaveadmin"
+	DbPassword  = "swavepwd"
+	DbName      = "swave"
+	DbHostWrite = "data"
+	DbPortWrite = "5432"
+	DbHostRead  = "data:replica"
+	DbPortRead  = "5433"
 )
 
 // Prometheus metrics
@@ -80,7 +82,8 @@ var (
 )
 
 var (
-	db       *sql.DB
+	writeDb  *sql.DB
+	readDb   *sql.DB
 	rabbitCh *amqp.Channel
 )
 
@@ -96,10 +99,16 @@ func envRead() string {
 	fmt.Printf("dbPassword: %s\n", DbPassword)
 	DbName = os.Getenv("DB_NAME")
 	fmt.Printf("DbName: %s\n", DbName)
-	DbHost = os.Getenv("DB_HOST")
-	fmt.Printf("DbHost: %s\n", DbHost)
-	DbPort = os.Getenv("DB_PORT")
-	fmt.Printf("DbPort: %s\n", DbPort)
+
+	DbHostWrite = os.Getenv("DB_HOST_WRITE")
+	fmt.Printf("DbHostWrite: %s\n", DbHostWrite)
+	DbPortWrite = os.Getenv("DB_PORT_WRITE")
+	fmt.Printf("DbPortWrite: %s\n", DbPortWrite)
+
+	DbHostRead = os.Getenv("DB_HOST_READ")
+	fmt.Printf("DbHostRead: %s\n", DbHostRead)
+	DbPortRead = os.Getenv("DB_PORT_READ")
+	fmt.Printf("DbPortRead: %s\n", DbPortRead)
 
 	RabbitMQURL = os.Getenv("RABBITMQ_URL")
 	fmt.Printf("RabbitMQURL: %s\n", RabbitMQURL)
@@ -119,7 +128,7 @@ func main() {
 
 	//Connect to database
 	var err error
-	db, err = createDBConnection()
+	writeDb, err = createDBWriteConnection()
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
 	}
@@ -128,7 +137,18 @@ func main() {
 		if err != nil {
 			log.Printf("Error closing database connection: %v", err)
 		}
-	}(db)
+	}(writeDb)
+
+	readDb, err = createDBReadConnection()
+	if err != nil {
+		log.Fatalf("Error connecting to database: %v", err)
+	}
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Printf("Error closing database connection: %v", err)
+		}
+	}(readDb)
 
 	//Connect to RabbitMQ
 	rabbitCh, err = setupRabbitMQ()
@@ -203,10 +223,16 @@ func metricsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// Create a database connection
-func createDBConnection() (*sql.DB, error) {
+// Create database connections
+func createDBWriteConnection() (*sql.DB, error) {
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		DbHost, DbPort, DbUser, DbPassword, DbName)
+		DbHostWrite, DbPortWrite, DbUser, DbPassword, DbName)
+	return sql.Open("postgres", connStr)
+}
+
+func createDBReadConnection() (*sql.DB, error) {
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		DbHostRead, DbPortRead, DbUser, DbPassword, DbName)
 	return sql.Open("postgres", connStr)
 }
 
@@ -657,7 +683,7 @@ func ConvertStringToInt(n string) (int, error) {
 // InsertMessage inserts a new message associated with a user ID
 func insertMessage(message string, userID int) (int, error) {
 	var id int
-	err := db.QueryRow(
+	err := writeDb.QueryRow(
 		"INSERT INTO messages (message, user_id) VALUES ($1, $2) RETURNING id",
 		message, userID,
 	).Scan(&id)
@@ -666,7 +692,7 @@ func insertMessage(message string, userID int) (int, error) {
 
 func fetchMessageByID(id string) (Message, error) {
 	var msg Message
-	err := db.QueryRow(
+	err := readDb.QueryRow(
 		"SELECT id, message, user_id FROM messages WHERE id = $1", id,
 	).Scan(&msg.ID, &msg.Message, &msg.UserID)
 	return msg, err
@@ -674,7 +700,7 @@ func fetchMessageByID(id string) (Message, error) {
 
 func fetchMessageWithUsername(id string) (MessageWithUser, error) {
 	var msg MessageWithUser
-	err := db.QueryRow(
+	err := readDb.QueryRow(
 		`SELECT m.id, m.message, u.username 
          FROM messages m 
          JOIN user_replica u ON m.user_id = u.id 
@@ -691,7 +717,7 @@ func fetchMessageWithUsername(id string) (MessageWithUser, error) {
 
 // currently no endpoint
 func fetchAllMessages() ([]Message, error) {
-	rows, err := db.Query("SELECT id, message, user_id FROM messages")
+	rows, err := readDb.Query("SELECT id, message, user_id FROM messages")
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +740,7 @@ func fetchAllMessages() ([]Message, error) {
 }
 
 func fetchAllMessagesWithUsers() ([]MessageWithUser, error) {
-	rows, err := db.Query(`
+	rows, err := readDb.Query(`
         SELECT m.id, m.message, u.username 
         FROM messages m 
         JOIN user_replica u ON m.user_id = u.id
@@ -741,7 +767,7 @@ func fetchAllMessagesWithUsers() ([]MessageWithUser, error) {
 }
 
 func fetchAllMessagesByUserId(userId string) ([]Message, error) {
-	rows, err := db.Query(
+	rows, err := readDb.Query(
 		`SELECT id, message, user_id
 			FROM messages
 			WHERE user_id = $1`, userId,
@@ -769,7 +795,7 @@ func fetchAllMessagesByUserId(userId string) ([]Message, error) {
 
 func updateMessageDetails(id string, messageBody string) (Message, error) {
 	var message Message
-	err := db.QueryRow(
+	err := writeDb.QueryRow(
 		"UPDATE messages SET message = $2 WHERE id = $1 RETURNING id, message, user_id",
 		id, messageBody,
 	).Scan(&message.ID, &message.Message, &message.UserID)
@@ -777,7 +803,7 @@ func updateMessageDetails(id string, messageBody string) (Message, error) {
 }
 
 func deleteMessageByID(id string) (int64, error) {
-	result, err := db.Exec("DELETE FROM messages WHERE id = $1", id)
+	result, err := writeDb.Exec("DELETE FROM messages WHERE id = $1", id)
 	if err != nil {
 		return 0, err
 	}
@@ -785,7 +811,7 @@ func deleteMessageByID(id string) (int64, error) {
 }
 
 func insertUserReplica(id string, userName string) error {
-	_, err := db.Exec(
+	_, err := writeDb.Exec(
 		"INSERT INTO user_replica (id, username) VALUES ($1, $2)",
 		id, userName,
 	)
@@ -796,7 +822,7 @@ func insertUserReplica(id string, userName string) error {
 }
 
 func updateUserReplica(id string, userName string) error {
-	_, err := db.Exec(
+	_, err := writeDb.Exec(
 		"UPDATE user_replica SET username = $2 WHERE id = $1",
 		id, userName,
 	)
@@ -813,7 +839,7 @@ func deleteUserReplica(id string) error {
 		return err
 	}
 
-	_, err = db.Exec("DELETE FROM user_replica WHERE id = $1",
+	_, err = writeDb.Exec("DELETE FROM user_replica WHERE id = $1",
 		userID,
 	)
 	if err != nil {
@@ -823,7 +849,7 @@ func deleteUserReplica(id string) error {
 }
 
 func getUserReplica(id string) error {
-	_, err := db.Exec(
+	_, err := writeDb.Exec(
 		"SELECT id, username FROM user_replica WHERE id = $1",
 		id,
 	)
